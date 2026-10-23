@@ -127,3 +127,33 @@ test_that("outer optimizer failure cannot be labeled estimated despite inner con
   expect_match(fit$summary$model_warning,"iteration limit")
   expect_true(is.na(fit$summary$annual_irr));expect_equal(nrow(fit$predictions),0L)
 })
+
+
+test_that("known-ID label variants do not duplicate one isolate or its tests", {
+  x<-build_culture_data(h,adt,micro);a<-filter(x$rows,organism_id=="a")
+  variants<-bind_rows(a,mutate(a,organism_name="alternate laboratory spelling",organism_group="alternate group label"))
+  ast<-tibble(organism_id="a",antimicrobial_category="ceftriaxone",susceptibility_category="susceptible")
+  result<-build_susceptibility_analysis(variants,ast,monthly_icu_denominators(x$icu_admissions,ts("2020-02-01")))
+  z<-filter(result$monthly,specimen_stratum=="Overall")
+  expect_equal(z$n_culture_isolates,1L);expect_equal(z$n_susceptible,1L);expect_equal(z$testing_fraction,1)
+})
+
+test_that("true ID conflicts carry private details and shareable aggregate diagnostics", {
+  x<-build_culture_data(h,adt,micro);a<-filter(x$rows,organism_id=="a")
+  ast<-tibble(organism_id="a",antimicrobial_category="ceftriaxone",susceptibility_category="susceptible")
+  for(field in c("culture_event_id","patient_id","hospitalization_id","organism_category","fluid_category","collect_dttm")) {
+    changed<-a
+    changed[[field]]<-if(field=="culture_event_id")999L else if(field=="collect_dttm")a$collect_dttm+3600 else "different"
+    rows<-bind_rows(a,changed)
+    e<-tryCatch(build_susceptibility_analysis(rows,ast,monthly_icu_denominators(x$icu_admissions,ts("2020-02-01"))),error=identity)
+    expect_s3_class(e,"susceptibility_linkage_error");expect_equal(nrow(e$linkage_diagnostics$conflicts),1L)
+    expect_equal(nrow(e$linkage_diagnostics$details),2L)
+    aggregate<-e$linkage_diagnostics$qc
+    expect_false(any(grepl("_id$|_dttm$",names(aggregate))))
+  }
+  root<-tempfile();private<-file.path(root,"private");public<-file.path(root,"public")
+  write_susceptibility_linkage_diagnostics(e$linkage_diagnostics,private,public,"TEST","fixture")
+  expect_length(list.files(private),2L);expect_length(list.files(public),1L)
+  summary<-readr::read_csv(list.files(public,full.names=TRUE),show_col_types=FALSE)
+  expect_equal(names(summary),c("metric","n","site_name"));expect_true(all(summary$site_name=="TEST"))
+})

@@ -37,14 +37,55 @@ screen_susceptibility_months <- function(x, coverage_min = 0.5, linkage_min = 0.
     minimum_testing_fraction_for_rate=coverage_min, minimum_linkage_fraction=linkage_min)
 }
 
+# An ID identifies one retained isolate event/category. Raw labels are not linkage keys.
+# Missing-ID isolates retain source labels so distinct unlinked isolates stay in coverage.
+prepare_susceptibility_isolates <- function(rows) {
+  positives <- rows %>% dplyr::filter(positive_culture) %>% dplyr::mutate(
+    organism_id=dplyr::na_if(as.character(organism_id),""),organism_category=dplyr::na_if(organism_category,""))
+  keys <- c("organism_id","culture_event_id","patient_id","hospitalization_id","organism_category","fluid_category","collect_dttm")
+  identified <- positives %>% dplyr::filter(!is.na(organism_category),!is.na(organism_id)) %>%
+    dplyr::distinct(dplyr::across(dplyr::all_of(keys)))
+  unidentified <- positives %>% dplyr::filter(!is.na(organism_category),is.na(organism_id)) %>%
+    dplyr::distinct(dplyr::across(dplyr::all_of(keys)),dplyr::across(dplyr::any_of(c("organism_name","organism_group"))))
+  isolates <- dplyr::bind_rows(identified,unidentified) %>% dplyr::mutate(calendar_month=lubridate::floor_date(collect_dttm,"month"))
+  conflicts <- identified %>% dplyr::group_by(organism_id) %>% dplyr::summarise(
+    n_isolate_mappings=dplyr::n(),n_culture_events=dplyr::n_distinct(culture_event_id),
+    n_patients=dplyr::n_distinct(patient_id),n_hospitalizations=dplyr::n_distinct(hospitalization_id),
+    n_organism_categories=dplyr::n_distinct(organism_category),n_specimen_categories=dplyr::n_distinct(fluid_category),
+    n_collection_times=dplyr::n_distinct(collect_dttm),.groups="drop") %>% dplyr::filter(n_isolate_mappings>1)
+  details <- positives %>% dplyr::semi_join(conflicts,by="organism_id") %>%
+    dplyr::select(dplyr::any_of(c(keys,"organism_name","organism_group","order_dttm","result_dttm","fluid_name","method_name","icu_admission_id","microbiology_row_id"))) %>% dplyr::distinct()
+  qc <- tibble::tibble(metric=c("conflicting_organism_ids","conflicting_ids_across_culture_events","conflicting_ids_across_patients",
+    "conflicting_ids_across_hospitalizations","conflicting_ids_across_organism_categories","conflicting_ids_across_specimen_categories",
+    "conflicting_ids_across_collection_times","positive_rows_with_conflicting_ids"),
+    n=c(nrow(conflicts),sum(conflicts$n_culture_events>1),sum(conflicts$n_patients>1),sum(conflicts$n_hospitalizations>1),
+      sum(conflicts$n_organism_categories>1),sum(conflicts$n_specimen_categories>1),sum(conflicts$n_collection_times>1),
+      sum(positives$organism_id %in% conflicts$organism_id)))
+  list(positives=positives,isolates=isolates,conflicts=conflicts,details=details,qc=qc)
+}
+
+# Patient/isolate identifiers and exact timestamps must only be written to private intermediates.
+write_susceptibility_linkage_diagnostics <- function(diagnostics,private_dir,aggregate_dir,site_name,stamp) {
+  dir.create(private_dir,recursive=TRUE,showWarnings=FALSE)
+  dir.create(aggregate_dir,recursive=TRUE,showWarnings=FALSE)
+  readr::write_csv(diagnostics$conflicts,file.path(private_dir,paste0("organism_id_conflicts_",stamp,".csv")))
+  readr::write_csv(diagnostics$details,file.path(private_dir,paste0("organism_id_conflict_culture_rows_",stamp,".csv")))
+  readr::write_csv(dplyr::mutate(diagnostics$qc,site_name=site_name),file.path(aggregate_dir,paste0("susceptibility_linkage_conflict_summary_",site_name,"_",stamp,".csv")))
+  private_dir
+}
+
 build_susceptibility_analysis <- function(rows, ast, denominators, mcide_dir = "config/mcide", coverage_min = 0.5, linkage_min = 0.9) {
   ast <- normalize_susceptibility(ast, mcide_dir)
   qc <- tibble::tibble(metric=c("ast_rows","missing_organism_id_rows","unmapped_antimicrobial_rows","unmapped_result_rows"),n=c(nrow(ast),sum(is.na(ast$organism_id)),sum(!ast$antimicrobial_mapped),sum(ast$unmapped_result)))
   # Retain every positive isolate in coverage denominators, including missing linkage IDs.
-  positives <- rows %>% dplyr::filter(positive_culture) %>% dplyr::mutate(organism_id=dplyr::na_if(as.character(organism_id),""),organism_category=dplyr::na_if(organism_category,""))
-  isolates <- positives %>% dplyr::filter(!is.na(organism_category)) %>% dplyr::distinct(organism_id,culture_event_id,patient_id,hospitalization_id,organism_category,fluid_category,collect_dttm,dplyr::across(dplyr::any_of(c("organism_name","organism_group")))) %>% dplyr::mutate(calendar_month=lubridate::floor_date(collect_dttm,"month"))
+  prepared <- prepare_susceptibility_isolates(rows)
+  positives <- prepared$positives;isolates <- prepared$isolates
   linkable <- isolates %>% dplyr::filter(!is.na(organism_id))
-  if (anyDuplicated(linkable$organism_id)) stop("organism_id maps to multiple ICU isolate events or categories; fix linkage before susceptibility analysis.")
+  if (nrow(prepared$conflicts)) stop(structure(list(
+    message=paste0("organism_id maps to multiple ICU isolate events or categories: ",nrow(prepared$conflicts),
+      " conflicting IDs. Fix linkage before susceptibility analysis; do not drop duplicate IDs arbitrarily."),
+    call=NULL,linkage_diagnostics=prepared[c("conflicts","details","qc")]),
+    class=c("susceptibility_linkage_error","error","condition")))
   qc <- dplyr::bind_rows(qc,tibble::tibble(metric=c("positive_culture_rows_missing_organism_id","positive_culture_rows_missing_organism_category","linkable_icu_isolates","ast_rows_unlinked_to_icu_isolate"),n=c(sum(is.na(positives$organism_id)),sum(is.na(positives$organism_category)),nrow(linkable),sum(!ast$organism_id %in% linkable$organism_id))))
   tests <- ast %>% dplyr::filter(!is.na(organism_id),antimicrobial_mapped) %>% dplyr::group_by(organism_id,antimicrobial_category) %>%
     dplyr::summarise(n_source_rows=dplyr::n(),conflicting_result=all(c("susceptible","non_susceptible") %in% susceptibility_category),

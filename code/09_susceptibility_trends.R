@@ -59,4 +59,12 @@ run_susceptibility <- function() {
   p<-ggplot(coverage,aes(calendar_month,fraction,color=metric))+geom_point(na.rm=TRUE)+facet_wrap(~pair,ncol=3)+geom_hline(yintercept=coverage_min,linetype=2,color="grey50")+geom_hline(yintercept=linkage_min,linetype=3,color="grey50")+scale_y_continuous(limits=c(0,1),labels=scales::percent)+labs(x=NULL,y="Isolate linkage / interpretable testing coverage",color=NULL,caption=NULL)+theme_bw()+theme(legend.position="bottom")
   ggsave(file.path(out_dir,glue("susceptibility_testing_coverage_{clif_site_name}_{stamp}.png")),p,width=14,height=10,dpi=200)
 }
-tryCatch(run_susceptibility(),error=function(e){write_availability("failed");stop(e)})
+tryCatch(run_susceptibility(),error=function(e){
+  if(inherits(e,"susceptibility_linkage_error")) {
+    private_dir<-write_susceptibility_linkage_diagnostics(e$linkage_diagnostics,
+      project_intermediate_dir("susceptibility"),out_dir,clif_site_name,stamp)
+    message("Linkage details saved locally to ",private_dir,
+      ". These files contain identifiers/timestamps and must stay local. Share only susceptibility_linkage_conflict_summary from the aggregate output.")
+  }
+  write_availability("failed");stop(e)
+})

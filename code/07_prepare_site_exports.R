@@ -29,6 +29,7 @@ dir.create(manifest_dir, recursive = TRUE, showWarnings = FALSE)
 disallowed_columns <- c(
   "patient_id",
   "culture_event_id",
+  "collection_id",
   "detection_event_id",
   "culture_row_id",
   "hospitalization_id",
@@ -45,7 +46,10 @@ disallowed_columns <- c(
   "order_dttm",
   "collect_dttm",
   "result_dttm",
-  "first_culture_dttm"
+  "first_culture_dttm",
+  "index_collect_dttm",
+  "marker_time",
+  "event_time"
 )
 
 csv_files <- list.files(output_dir, pattern = "\\.csv$", recursive = TRUE, full.names = TRUE)
@@ -84,7 +88,7 @@ privacy_audit <- manifest %>%
   tidyr::separate_longer_delim(columns, delim = "; ") %>%
   mutate(
     lower_column = str_to_lower(columns),
-    disallowed = lower_column %in% disallowed_columns | str_detect(lower_column, "(^|_)datetime$")
+    disallowed = lower_column %in% disallowed_columns | str_detect(lower_column, "(^|_)datetime$|_dttm$")
   ) %>%
   filter(disallowed) %>%
   select(site_name, export_relative_path, disallowed_column = columns)
